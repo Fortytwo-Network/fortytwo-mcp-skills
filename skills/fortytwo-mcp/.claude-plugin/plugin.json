@@ -1,0 +1,37 @@
+{
+  "name": "fortytwo-mcp",
+  "version": "1.0.0",
+  "description": "Fortytwo MCP calls Fortytwo Prime to deliver the best possible answer through a paid gateway. It is ideal for high-complexity questions and critical moments when your agent needs to be right.",
+  "author": {
+    "name": "Fortytwo"
+  },
+  "homepage": "https://github.com/Fortytwo-Network/fortytwo-mcp-skills/tree/main/skills/fortytwo-mcp",
+  "repository": "https://github.com/Fortytwo-Network/fortytwo-mcp-skills",
+  "license": "MIT",
+  "keywords": [
+    "Inference",
+    "AI",
+    "AI & LLMs",
+    "llm-tools",
+    "LLM",
+    "MCP",
+    "MCP-Server",
+    "Code Quality",
+    "Development",
+    "Engineering",
+    "Fortytwo"
+  ],
+  "skills": [
+    "./SKILL.md"
+  ],
+  "userConfig": {
+    "evm_private_key": {
+      "description": "EVM private key for x402 payment signing. Use a dedicated low-value wallet.",
+      "sensitive": true
+    },
+    "rpc_url": {
+      "description": "RPC endpoint for Base or Monad. Optional — defaults to public RPCs.",
+      "sensitive": false
+    }
+  }
+}
