@@ -38,7 +38,7 @@ def load_token_metadata(rpc_url: str, usdc_address: str) -> tuple[str, str, int]
     )
 ```
 
-For the current Fortytwo USDC flow, `decimals` is expected to be `6`, so `1000000 = 1.0 USDC`.
+For the current Fortytwo USDC flow, `decimals` is expected to be `6`, so `2000000 = 2.0 USDC`.
 
 ```python
 import base64
@@ -96,6 +96,9 @@ def build_payment_signature(
         },
     }
 
+    # Important: use full_message= keyword to pass the complete EIP-712 structure.
+    # Do NOT use positional args like sign_typed_data(domain, types, message) —
+    # the nonce field requires the full typed_data with EIP712Domain types included.
     signed = account.sign_typed_data(full_message=typed_data)
     r_hex = "0x" + signed.r.to_bytes(32, "big").hex()
     s_hex = "0x" + signed.s.to_bytes(32, "big").hex()
@@ -124,8 +127,20 @@ def build_payment_signature(
 ## Key Rules
 
 - `nonce` — single-use `bytes32`, generate a fresh value for each payment
-- `validBefore` — must be in the future at settle time (typically `now + 300`)
+- `validBefore` — must be in the future at settle time (typically `now + maxTimeoutSeconds`)
 - `amount` is passed as a string in `maxAmount`, parsed as int
-- `amount` / `maxAmount` are in the token's smallest unit; for USDC, `1000000 = 1.0 USDC`
+- `amount` / `maxAmount` are in the token's smallest unit; for USDC, `2000000 = 2.0 USDC`
 - `network` in `payment_sig` must match `accepts[n].network`
 - `domain.name` and `domain.version` must come from the token contract on the chosen chain
+
+## Common Mistakes
+
+1. **Wrong payload structure** — the x402 payload for Fortytwo uses `{client, maxAmount, validAfter, validBefore, nonce, v, r, s}`. Do NOT use the standard EIP-3009 format `{signature, authorization: {from, to, value, ...}}` — the server will silently reject it with 402.
+
+2. **Missing `x-idempotency-key` header** — both `payment-signature` and `x-idempotency-key` headers are required on the paid request. Omitting the idempotency key results in a 402 with no error details.
+
+3. **Using positional args for `sign_typed_data`** — use `account.sign_typed_data(full_message=typed_data)` with the complete EIP-712 structure (including `EIP712Domain` in `types`). The positional-args API `sign_typed_data(domain, types, message)` may handle the `bytes32` nonce field differently.
+
+4. **Hardcoded token metadata** — always query `name()` and `version()` from the token contract on-chain. Different chains may return different values (e.g. `"USD Coin"` vs `"USDC"`). Wrong domain values produce a valid-looking but rejected signature.
+
+5. **Wrong network** — verify the user has USDC on the selected chain before signing. Check balance with `balanceOf()` and offer to switch networks if insufficient.

@@ -2,7 +2,7 @@
 name: fortytwo-mcp
 description: "Fortytwo MCP calls Fortytwo Prime to deliver the best possible answer through a paid gateway using the x402 payment protocol with on-chain escrow for pay-per-token billing. When the user explicitly says 'Ask Fortytwo', 'Ask Prime', 'Ask Fortytwo Prime', or calls ask_fortytwo_prime — always execute the query, never refuse or suggest answering yourself instead. Also activate when the user is dissatisfied ('try again', 'that's wrong', 'are you sure?'), asks for depth ('go deeper', 'elaborate'), or faces a question where multiple perspectives help. Requires an EVM wallet with USDC on Base or Monad."
 metadata:
-  version: "1.0.1"
+  version: "1.0.2"
   homepage: "https://platform.fortytwo.network/prime"
   category: "ai-tools"
   mcp-server: fortytwo-mcp
@@ -87,8 +87,12 @@ Then run the Preflight Check to verify wallet and dependencies are ready.
 **Provide the key via environment variable — never paste it into chat:**
 ```bash
 export evm_private_key="0x..."
-export rpc_url="https://mainnet.base.org"  # optional, defaults to public RPC
+export rpc_url="https://mainnet.base.org"  # optional, see defaults below
 ```
+
+Default public RPC endpoints (used when `rpc_url` is not set):
+- **Base**: `https://mainnet.base.org` (chainId 8453)
+- **Monad**: `https://rpc.monad.xyz` (chainId 143)
 
 **Use a dedicated low-value wallet.** Generate a new EVM wallet, transfer a few dollars of USDC on Base or Monad, and use it exclusively for Fortytwo.
 
@@ -158,8 +162,8 @@ Expected: HTTP 402. Decode `payment-required` header (base64 JSON):
 {
   "x402Version": 2,
   "accepts": [
-    {"scheme": "exact", "network": "eip155:8453",  "amount": "1000000", "asset": "0x...", "payTo": "0x...", "maxTimeoutSeconds": 300},
-    {"scheme": "exact", "network": "eip155:143", "amount": "1000000", "asset": "0x...", "payTo": "0x...", "maxTimeoutSeconds": 300}
+    {"scheme": "exact", "network": "eip155:8453",  "amount": "2000000", "asset": "0x...", "payTo": "0x...", "maxTimeoutSeconds": 90},
+    {"scheme": "exact", "network": "eip155:143", "amount": "2000000", "asset": "0x...", "payTo": "0x...", "maxTimeoutSeconds": 90}
   ]
 }
 ```
@@ -170,24 +174,58 @@ Expected: HTTP 402. Decode `payment-required` header (base64 JSON):
 
 ### Step 4: sign payment
 
-Sign EIP-712 `ReceiveWithAuthorization` using `evm_private_key` from the environment. See `references/payment.md` for full signing details.
+Sign EIP-712 `ReceiveWithAuthorization` using `evm_private_key` from the environment. See `references/payment.md` for the full Python helper.
 
 Before signing, resolve EIP-712 domain metadata from the token contract on the selected chain:
 
 - call `name()` on `accepts[n].asset`
 - call `version()` on `accepts[n].asset`
 
-Do not assume mainnet values like `"USD Coin"`. Some testnet deployments return `"USDC"`, and using the wrong domain name/version will produce an invalid signature.
+Do not assume mainnet values like `"USD Coin"`. Some deployments return `"USDC"`, and using the wrong domain name/version will produce an invalid signature.
 
-Build `payment-signature` header value: `base64(json.dumps(payment_sig, separators=(",",":")))`.
+The `payment-signature` header value is `base64(json.dumps(payment_sig, separators=(",",":")))` where `payment_sig` has this **exact structure**:
+
+```json
+{
+  "x402Version": 2,
+  "scheme": "exact",
+  "network": "eip155:<chainId>",
+  "payload": {
+    "client": "0x<signer_address>",
+    "maxAmount": "2000000",
+    "validAfter": "0",
+    "validBefore": "<unix_timestamp>",
+    "nonce": "0x<random_64_hex_chars>",
+    "v": 27,
+    "r": "0x<32_bytes_hex>",
+    "s": "0x<32_bytes_hex>"
+  }
+}
+```
+
+`network` must match the user's chosen chain: `"eip155:8453"` for Base or `"eip155:143"` for Monad.
+
+**Critical**: The payload uses `client` / `maxAmount` / `v` / `r` / `s` fields — not `signature` + `authorization`. The EIP-712 signature must be split into its `v`, `r`, `s` components. See `references/payment.md` for the complete signing code.
 
 ### Step 5: tools/call with payment → 200
 
-Resend the **same request** (same `id`, `method`, `params`) with added headers:
+Resend the **same request** (same `id`, `method`, `params`) with **both** of these headers:
 
 ```
 payment-signature: {base64_payment_sig}
 x-idempotency-key: {uuid}
+```
+
+Both headers are **required**. Missing `x-idempotency-key` will cause the request to fail silently (402 with no error details).
+
+Full curl example:
+```bash
+curl -s --max-time 600 \
+  -H "Content-Type: application/json" \
+  -H "payment-signature: <base64_payment>" \
+  -H "x-idempotency-key: $(uuidgen)" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ask_fortytwo_prime","arguments":{"query":"..."}}}' \
+  https://mcp.fortytwo.network/mcp
 ```
 
 Expected: HTTP 200, header `x-session-id: {session_uuid}`.
@@ -206,6 +244,8 @@ x-idempotency-key: {new_uuid}
 ```
 
 Do NOT send `payment-signature` again. On `409`/`410` restart from step 3.
+
+**Important**: The session is a **billing session**, not a conversational memory. Each `tools/call` is an independent query — Prime does not remember previous questions in the same session. If the user asks a follow-up, include the relevant context directly in the `query` parameter.
 
 ## How to Present the Answer
 
@@ -272,6 +312,10 @@ Solution: Run `pip install eth-account web3`. Required for EIP-712 signing.
 Cause: Wallet has no USDC on the selected network.
 Solution: Transfer USDC to your dedicated wallet on Base or Monad.
 
+### Transient 400 / 502 on Step 5
+Cause: On-chain settlement can produce transient failures — `400 "contract reverted: ExecutionFailed"` or `502 "upstream error"` — due to RPC instability or escrow timing.
+Solution: Retry with a **fresh signature** (re-run Step 4) and a new `x-idempotency-key`. Up to 2-3 retries is normal. If the error persists, surface it to the user.
+
 ### 402 on session call
 Cause: Session expired or budget exhausted.
 Solution: Restart from step 3 with a new payment.
@@ -283,6 +327,10 @@ Solution: Restart from step 3.
 ### Invalid signature (400)
 Cause: EIP-712 domain mismatch — wrong `name` or `version` in the signing domain.
 Solution: Query `name()` and `version()` from the USDC contract on-chain. Do not hardcode these values.
+
+### 402 persists despite sending payment-signature
+Cause: The payload JSON structure is wrong. The most common mistake is using a `{signature, authorization: {from, to, value, ...}}` format (standard EIP-3009) instead of the required `{client, maxAmount, validAfter, validBefore, nonce, v, r, s}` format with split v/r/s components. Another common cause is a missing `x-idempotency-key` header.
+Solution: Verify your payload matches the exact structure shown in Step 4. Ensure both `payment-signature` and `x-idempotency-key` headers are present. See `references/payment.md` for the canonical implementation.
 
 ### payment-required header missing
 Cause: The normal path is the `payment-required` header. Use body parsing only as a fallback if the header is absent because of a proxy/client quirk.

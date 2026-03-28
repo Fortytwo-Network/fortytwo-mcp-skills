@@ -3,11 +3,25 @@
 ## Opening a session
 
 A session is opened automatically on the first successful `tools/call` with `payment-signature`.
-The response includes the header:
+The response includes these headers:
 
 ```
 x-session-id: {uuid}
+payment-response: {base64_json}
 ```
+
+The `payment-response` header (base64-encoded JSON) contains settlement confirmation:
+```json
+{
+  "success": true,
+  "network": "eip155:143",
+  "transaction": "0x<tx_hash>",
+  "payer": "0x<wallet_address>",
+  "sessionId": "<session_uuid>"
+}
+```
+
+Save `x-session-id` for subsequent calls. The `transaction` hash can be used to verify on-chain settlement.
 
 The session is tied to an escrow (chain + escrow_id) and remains open until the budget is
 exhausted or a timeout expires.
