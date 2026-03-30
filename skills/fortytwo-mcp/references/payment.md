@@ -31,11 +31,13 @@ def load_token_metadata(rpc_url: str, usdc_address: str) -> tuple[str, str, int]
         address=Web3.to_checksum_address(usdc_address),
         abi=ERC20_META_ABI,
     )
-    return (
-        token.functions.name().call(),
-        token.functions.version().call(),
-        token.functions.decimals().call(),
-    )
+    name = token.functions.name().call()
+    try:
+        version = token.functions.version().call()
+    except Exception:
+        version = "1"  # fallback if version() not implemented on this deployment
+    decimals = token.functions.decimals().call()
+    return (name, version, decimals)
 ```
 
 For the current Fortytwo USDC flow, `decimals` is expected to be `6`, so `2000000 = 2.0 USDC`.
@@ -137,7 +139,7 @@ def build_payment_signature(
 
 1. **Wrong payload structure** — the x402 payload for Fortytwo uses `{client, maxAmount, validAfter, validBefore, nonce, v, r, s}`. Do NOT use the standard EIP-3009 format `{signature, authorization: {from, to, value, ...}}` — the server will silently reject it with 402.
 
-2. **Missing `x-idempotency-key` header** — both `payment-signature` and `x-idempotency-key` headers are required on the paid request. Omitting the idempotency key results in a 402 with no error details.
+2. **Missing `x-idempotency-key` header** — required on every `tools/call`. The server generates a fallback UUID if omitted, but providing your own ensures idempotent retries on network errors.
 
 3. **Using positional args for `sign_typed_data`** — use `account.sign_typed_data(full_message=typed_data)` with the complete EIP-712 structure (including `EIP712Domain` in `types`). The positional-args API `sign_typed_data(domain, types, message)` may handle the `bytes32` nonce field differently.
 
