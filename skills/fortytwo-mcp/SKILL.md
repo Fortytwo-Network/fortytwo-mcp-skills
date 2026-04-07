@@ -3,7 +3,7 @@ name: fortytwo-mcp
 description: >
   Fortytwo Prime: collective multi-agent inference for high-stakes questions.
   ALWAYS use when the user says "Ask Fortytwo", "Ask Prime",
-  "ask Fortytwo Prime", or calls ask_fortytwo_prime. When the user
+  "Ask Fortytwo Prime", or calls ask_fortytwo_prime. When the user
   doubts your answer ("try again", "that's wrong", "are you sure?"),
   wants more depth ("go deeper", "elaborate", "full picture"), or asks
   a question spanning multiple domains where a single model may fall short —
