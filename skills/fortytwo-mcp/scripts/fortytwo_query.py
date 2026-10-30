@@ -12,8 +12,10 @@ import argparse
 import base64
 import json
 import os
+from pathlib import Path
 import secrets
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -26,12 +28,35 @@ except ImportError:
     sys.exit(1)
 
 GATEWAY = "https://mcp.fortytwo.network/mcp"
-SESSION_FILE = "/tmp/.fortytwo_session"
+SESSION_FILE = str(Path.home() / ".fortytwo-mcp" / "session")
 
 NETWORKS = {
-    "base":  {"chain_id": 8453, "rpc": "https://mainnet.base.org",  "network": "eip155:8453"},
-    "monad": {"chain_id": 143,  "rpc": "https://rpc.monad.xyz",     "network": "eip155:143"},
+    "base":  {"chain_id": 8453, "rpc": "https://mainnet.base.org", "network": "eip155:8453",
+              "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"},
+    "monad": {"chain_id": 143, "rpc": "https://rpc.monad.xyz", "network": "eip155:143",
+              "asset": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"},
 }
+
+
+def validate_payment(accept, network, max_amount, pay_to):
+    """Fail closed before signing any gateway-controlled payment terms."""
+    config = NETWORKS[network]
+    if accept.get("scheme") != "exact" or accept.get("network") != config["network"]:
+        raise ValueError("Unsupported payment scheme or network")
+    if str(accept.get("asset", "")).lower() != config["asset"].lower():
+        raise ValueError("Untrusted payment asset")
+    if not pay_to or not Web3.is_address(pay_to) or int(pay_to, 16) == 0:
+        raise ValueError("Set --pay-to or FORTYTWO_ESCROW_ADDRESS to an independently verified escrow address")
+    if str(accept.get("payTo", "")).lower() != pay_to.lower():
+        raise ValueError("Payment recipient does not match the configured escrow")
+    amount = accept.get("amount")
+    if not isinstance(amount, str) or not amount.isascii() or not amount.isdecimal():
+        raise ValueError("Payment amount must be a decimal integer string")
+    if max_amount <= 0 or not 0 < int(amount) <= max_amount:
+        raise ValueError("Payment exceeds the configured spending limit")
+    timeout = accept.get("maxTimeoutSeconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 5400:
+        raise ValueError("Payment authorization lifetime must be 1-5400 seconds")
 
 ERC20_META_ABI = [
     {"name": "name",    "outputs": [{"type": "string"}], "inputs": [], "stateMutability": "view", "type": "function"},
@@ -49,10 +74,10 @@ def post(body, headers=None, timeout=600):
         hdrs.update(headers)
     req = urllib.request.Request(GATEWAY, data=body, headers=hdrs)
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
-        # http.client.HTTPMessage is case-insensitive on get(), but dict() can lose keys
-        resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-        return resp.status, resp_headers, resp.read().decode()
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # Normalize response header names without leaking session credentials.
+            resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+            return resp.status, resp_headers, resp.read().decode()
     except urllib.error.HTTPError as e:
         resp_headers = {k.lower(): v for k, v in e.headers.items()}
         return e.code, resp_headers, e.read().decode()
@@ -131,11 +156,22 @@ def sign_payment(private_key, chain_id, usdc_name, usdc_version, usdc_address, a
 
 
 def save_session(session_id):
+    """Atomically replace a session capability in a private per-user directory."""
+    path = Path(SESSION_FILE)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise OSError("Session directory must not be a symlink")
+    os.chmod(path.parent, 0o700)
+    temporary = None
     try:
-        with open(SESSION_FILE, "w") as f:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+            temporary = f.name
+            os.chmod(temporary, 0o600)
             f.write(session_id)
-    except OSError:
-        pass
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def load_session():
@@ -160,6 +196,10 @@ def main():
                         help="Payment network (default: base)")
     parser.add_argument("--session-id", help="Reuse existing session (auto-detected from previous run)")
     parser.add_argument("--no-session", action="store_true", help="Force new payment, ignore saved session")
+    parser.add_argument("--max-amount", type=int, default=2_000_000,
+                        help="Maximum deposit in USDC base units (default: 2000000 = 2 USDC)")
+    parser.add_argument("--pay-to", default=os.environ.get("FORTYTWO_ESCROW_ADDRESS"),
+                        help="Independently verified escrow recipient; required before a new payment")
     args = parser.parse_args()
 
     private_key = os.environ.get("evm_private_key")
@@ -198,7 +238,7 @@ def main():
 
     # Try session reuse first
     if session_id:
-        print(f"Reusing session: {session_id}", file=sys.stderr)
+        print("Reusing saved session", file=sys.stderr)
         idem = str(uuid.uuid4())
         status, hdrs, body = post(call_body, {
             "x-session-id": session_id,
@@ -209,7 +249,10 @@ def main():
             sid = hdrs.get("x-session-id", session_id)
             output(result.get("result", {}).get("content", [{}])[0].get("text", body), sid)
             return
-        print(f"Session expired/invalid ({status}), making new payment...", file=sys.stderr)
+        if status not in (402, 410):
+            print(f"ERROR: session request failed ({status}); refusing automatic new payment", file=sys.stderr)
+            sys.exit(1)
+        print(f"Session expired/exhausted ({status}), making new payment...", file=sys.stderr)
 
     # Expect 402
     status, hdrs, body = post(call_body)
@@ -230,6 +273,8 @@ def main():
         print(f"ERROR: network {target_net} not in 402 accepts", file=sys.stderr)
         sys.exit(1)
 
+    validate_payment(accept, args.network, args.max_amount, args.pay_to)
+
     amount_usdc = int(accept["amount"]) / 1e6
     print(f"Escrow deposit: {amount_usdc:.2f} USDC on {args.network}", file=sys.stderr)
 
@@ -237,12 +282,13 @@ def main():
     usdc_address = accept["asset"]
     usdc_name, usdc_version = load_token_meta(rpc_url, usdc_address)
 
+    # Retries represent one logical payment: reuse its nonce, signature, and key.
+    payment_sig = sign_payment(
+        private_key, NETWORKS[args.network]["chain_id"],
+        usdc_name, usdc_version, usdc_address, accept,
+    )
+    idem = str(uuid.uuid4())
     for attempt in range(1, 4):
-        payment_sig = sign_payment(
-            private_key, NETWORKS[args.network]["chain_id"],
-            usdc_name, usdc_version, usdc_address, accept,
-        )
-        idem = str(uuid.uuid4())
         status, hdrs, body = post(call_body, {
             "payment-signature": payment_sig,
             "x-idempotency-key": idem,
@@ -250,7 +296,7 @@ def main():
 
         if status == 200:
             break
-        if status in (400, 502) and attempt < 3:
+        if status in (502, 503, 504) and attempt < 3:
             print(f"Transient error ({status}), retry {attempt}/3...", file=sys.stderr)
             time.sleep(2 * attempt)
             continue
