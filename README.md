@@ -1,3 +1,16 @@
+# Archived — fortytwo-mcp-skills
+
+> Fortytwo Prime via MCP is no longer available. Please do not install this skill, send queries, or authorize payments.
+> This repository is retained for historical reference and is no longer maintained.
+
+Current platform: https://platform.fortytwo.network
+
+News: https://x.com/fortytwo
+
+## Legacy documentation (for reference only)
+
+The material below describes the retired service. Installation and operation instructions are obsolete.
+
 # Fortytwo MCP Skills
 
 [Agent Skills](https://agentskills.io) for [Fortytwo Network](https://fortytwo.network) — the first collective super-intelligence owned by its participants. These skills enable AI agents to query Fortytwo Prime for high-confidence answers. 
